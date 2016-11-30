@@ -16,15 +16,13 @@
 package io.spring.configuration;
 
 import java.io.IOException;
-import java.sql.PreparedStatement;
-import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
-
 import javax.sql.DataSource;
 
 import io.spring.batch.DownloadingStepExecutionListener;
 import io.spring.batch.Foo;
+import io.spring.task.AppendingCommandLineArgsProvider;
 
 import org.springframework.batch.core.Job;
 import org.springframework.batch.core.Step;
@@ -39,13 +37,13 @@ import org.springframework.batch.core.partition.support.Partitioner;
 import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.batch.item.ItemReader;
 import org.springframework.batch.item.ItemWriter;
-import org.springframework.batch.item.database.ItemPreparedStatementSetter;
 import org.springframework.batch.item.database.JdbcBatchItemWriter;
 import org.springframework.batch.item.file.FlatFileItemReader;
 import org.springframework.batch.item.file.builder.FlatFileItemReaderBuilder;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cloud.deployer.spi.task.TaskLauncher;
+import org.springframework.cloud.task.batch.partition.CommandLineArgsProvider;
 import org.springframework.cloud.task.batch.partition.DeployerPartitionHandler;
 import org.springframework.cloud.task.batch.partition.DeployerStepExecutionHandler;
 import org.springframework.cloud.task.batch.partition.NoOpEnvironmentVariablesProvider;
@@ -77,7 +75,7 @@ public class JobConfiguration {
 	private JobBuilderFactory jobBuilderFactory;
 
 	@Bean
-	@Profile("!worker")
+	@Profile("master")
 	public Partitioner partitioner() throws IOException {
 		Resource[] resources =
 				this.resourcePatternResolver.getResources("s3://connected-car-artifacts/inputs/*.csv");
@@ -89,23 +87,34 @@ public class JobConfiguration {
 	}
 
 	@Bean
-	@Profile("!worker")
-	public DeployerPartitionHandler partitionHandler(TaskLauncher taskLauncher,
-			JobExplorer jobExplorer) {
-		DeployerPartitionHandler partitionHandler =
-				new DeployerPartitionHandler(taskLauncher,
-						jobExplorer,
-						context.getResource("file:///Users/mminella/.m2/repository/io/spring/s3jdbc/0.0.1-SNAPSHOT/s3jdbc-0.0.1-SNAPSHOT.jar"),
-						"load");
+	@Profile("master")
+	public AppendingCommandLineArgsProvider commandLineArgsProvider() {
+		AppendingCommandLineArgsProvider provider = new AppendingCommandLineArgsProvider();
 
-		List<String> commandLineArgs = new ArrayList<>(3);
+		List<String> commandLineArgs = new ArrayList<>(4);
 		commandLineArgs.add("--spring.profiles.active=worker");
 		commandLineArgs.add("--spring.cloud.task.initialize.enable=false");
 		commandLineArgs.add("--spring.batch.initializer.enabled=false");
 		commandLineArgs.add("--spring.datasource.initialize=false");
-		partitionHandler.setCommandLineArgsProvider(new PassThroughCommandLineArgsProvider(commandLineArgs));
+		provider.addCommandLineArgs(commandLineArgs);
+
+		return provider;
+	}
+
+	@Bean
+	@Profile("master")
+	public DeployerPartitionHandler partitionHandler(TaskLauncher taskLauncher,
+			JobExplorer jobExplorer,
+			CommandLineArgsProvider commandLineArgsProvider) {
+		DeployerPartitionHandler partitionHandler =
+				new DeployerPartitionHandler(taskLauncher,
+						jobExplorer,
+						context.getResource("http://github.com/mminella/task_jars/raw/master/s3jdbc-0.0.1-SNAPSHOT.jar"),
+						"load");
+
+		partitionHandler.setCommandLineArgsProvider(commandLineArgsProvider);
 		partitionHandler.setEnvironmentVariablesProvider(new NoOpEnvironmentVariablesProvider());
-		partitionHandler.setMaxWorkers(1);
+		partitionHandler.setMaxWorkers(2);
 		partitionHandler.setApplicationName("S3LoaderJob");
 
 		return partitionHandler;
@@ -167,7 +176,7 @@ public class JobConfiguration {
 	}
 
 	@Bean
-	@Profile("!worker")
+	@Profile("master")
 	public Step master(Partitioner partitioner, PartitionHandler partitionHandler) {
 		return this.stepBuilderFactory.get("master")
 				.partitioner("load", partitioner)
@@ -176,7 +185,7 @@ public class JobConfiguration {
 	}
 
 	@Bean
-	@Profile("!worker")
+	@Profile("master")
 	public Job job() {
 		return this.jobBuilderFactory.get("s3jdbc")
 				.start(master(null, null))
